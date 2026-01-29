@@ -1,0 +1,24 @@
+name: Repo Secret Scan (TruffleHog)
+
+on:
+  push:
+    branches: ["**"]
+  schedule:
+    - cron: '0 2 * * 1'  # every Monday 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog (verified findings only)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          extra_args: --only-verified

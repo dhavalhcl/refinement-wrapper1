@@ -1,0 +1,35 @@
+name: Terratest (Optional)
+
+on:
+  schedule:
+    - cron: '30 1 * * *'  # nightly 01:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terratest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: test/go.mod
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: Download Go dependencies
+        working-directory: test
+        run: |
+          go mod download
+          go mod verify
+      - name: Run Terratest
+        working-directory: test
+        env:
+          # Default to dev for CI confidence runs; override when dispatching manually
+          ENVIRONMENT: dev
+        run: |
+          echo "Running Terratest for ${ENVIRONMENT} environment..."
+          go test -v -timeout 30m ./...

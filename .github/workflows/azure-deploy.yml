@@ -1,0 +1,132 @@
+name: Azure Terraform Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        required: true
+        type: choice
+        options: [dev, qa, prod]
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options: [plan, apply]
+        default: plan
+  # Optional: enable path-based auto-deploys IF you later segregate Azure paths
+  # push:
+  #   paths:
+  #     - "tf/environments/dev/**"
+  #     - "tf/environments/qa/**"
+  #     - "tf/environments/prod/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Default to current structure; update to tf/azure/environments when you split by cloud
+  TF_ROOT: tf/environments
+
+jobs:
+  set-context:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.setenv.outputs.environment }}
+      workdir: ${{ steps.setenv.outputs.workdir }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: setenv
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ inputs.environment }}"
+          else
+            echo "Only workflow_dispatch is enabled by default."
+            exit 1
+          fi
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "workdir=$TF_ROOT/$ENV" >> $GITHUB_OUTPUT
+          echo "Environment: $ENV; Workdir: $TF_ROOT/$ENV"
+
+  lint_scan:
+    runs-on: ubuntu-latest
+    needs: set-context
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+      - name: TFLint
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: |
+          tflint --init
+          tflint
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ needs.set-context.outputs.workdir }}
+          framework: terraform
+          soft_fail: true
+
+  terraform:
+    runs-on: ubuntu-latest
+    needs: lint_scan
+    environment: ${{ needs.set-context.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Azure OIDC (recommended)
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: terraform plan -input=false -out=tfplan -no-color | tee plan.txt
+
+      - name: Upload Plan (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ needs.set-context.outputs.environment }}
+          path: |
+            ${{ needs.set-context.outputs.workdir }}/tfplan
+            ${{ needs.set-context.outputs.workdir }}/plan.txt
+          retention-days: 14
+
+      - name: Terraform Apply
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'apply' }}
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform Output
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'apply' }}
+        working-directory: ${{ needs.set-context.outputs.workdir }}
+        run: |
+          terraform output -json > outputs.json
+          terraform output
+
+      - name: Upload Outputs (artifact)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'apply' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: outputs-${{ needs.set-context.outputs.environment }}
+          path: ${{ needs.set-context.outputs.workdir }}/outputs.json
+          retention-days: 30
